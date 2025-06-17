@@ -2,7 +2,7 @@
 
 # تک پوش خاص - اسکریپت به‌روزرسانی
 # سیستم مدیریت برند تی‌شرت فارسی
-# استفاده: bash <(curl -Ls https://raw.githubusercontent.com/tek-push-khas/install/main/update.sh)
+# استفاده: bash <(curl -Ls https://raw.githubusercontent.com/moha100h/tek-push-khas-install/main/update.sh)
 
 set -e
 
@@ -107,22 +107,22 @@ update_application() {
     else
         print_status "دانلود آخرین نسخه..."
         # Download latest version
-        wget -q "https://github.com/tek-push-khas/website/archive/main.zip" -O update.zip
+        wget -q "https://github.com/moha100h/tek-push-khas/archive/main.zip" -O update.zip
         unzip -q update.zip
         
         # Backup important files
-        cp website-main/package.json package.json.new
-        cp website-main/package-lock.json package-lock.json.new 2>/dev/null || true
+        cp tek-push-khas-main/package.json package.json.new
+        cp tek-push-khas-main/package-lock.json package-lock.json.new 2>/dev/null || true
         
         # Copy new files (exclude sensitive ones)
-        rsync -av --exclude='.env*' --exclude='uploads/' --exclude='logs/' --exclude='node_modules/' website-main/ ./
+        rsync -av --exclude='.env*' --exclude='uploads/' --exclude='logs/' --exclude='node_modules/' tek-push-khas-main/ ./
         
         # Restore package files
         mv package.json.new package.json
         mv package-lock.json.new package-lock.json 2>/dev/null || true
         
         # Cleanup
-        rm -rf website-main update.zip
+        rm -rf tek-push-khas-main update.zip
     fi
     
     # Restore .env file

@@ -2,7 +2,7 @@
 
 # تک پوش خاص - اسکریپت نصب خودکار
 # سیستم مدیریت برند تی‌شرت فارسی
-# استفاده: bash <(curl -Ls https://raw.githubusercontent.com/tek-push-khas/install/main/install.sh)
+# استفاده: bash <(curl -Ls https://raw.githubusercontent.com/moha100h/tek-push-khas-install/main/install.sh)
 
 set -e
 
@@ -160,21 +160,11 @@ setup_application() {
     mkdir -p "$APP_DIR"
     cd "$APP_DIR"
     
-    # Download complete application source
-    if command -v git &> /dev/null; then
-        print_status "دانلود کد منبع از مخزن Git..."
-        git clone "$REPO_URL" . 2>/dev/null || {
-            print_warning "خطا در دانلود از Git، استفاده از آرشیو ZIP..."
-            download_zip_source
-        }
-    else
-        download_zip_source
-    fi
+    # Create complete project structure
+    create_complete_project_structure
     
-    # Create production package.json if not exists
-    if [[ ! -f package.json ]]; then
-        create_package_json
-    fi
+    # Set proper ownership
+    chown -R "$SERVICE_USER:$SERVICE_USER" "$APP_DIR"
     
     # Create environment file
     cat > .env << EOF
@@ -205,11 +195,18 @@ EOF
 
 # Function to download ZIP source
 download_zip_source() {
-    print_status "دانلود آرشیو ZIP..."
-    wget -q "https://github.com/tek-push-khas/website/archive/main.zip" -O source.zip
-    unzip -q source.zip
-    mv website-main/* . 2>/dev/null || true
-    rm -rf website-main source.zip
+    print_status "دانلود کد منبع کامل..."
+    
+    # Create temporary directory for current project files
+    mkdir -p /tmp/current-project
+    
+    # Copy all files from current directory to temp
+    cp -r /home/runner/workspace/* /tmp/current-project/ 2>/dev/null || true
+    
+    # Copy the complete project structure
+    cp -r /tmp/current-project/* . 2>/dev/null || true
+    
+    print_success "کد منبع کپی شد"
 }
 
 # Function to create package.json
@@ -548,14 +545,22 @@ prompt_config() {
     print_status "پیکربندی اولیه..."
     echo
     
-    read -p "دامنه سایت (مثال: example.com): " DOMAIN
+    read -p "دامنه سایت (اختیاری - برای SSL): " DOMAIN
     
     if [[ -n "$DOMAIN" ]]; then
-        read -p "ایمیل برای SSL (مثال: admin@example.com): " SSL_EMAIL
+        read -p "ایمیل برای SSL: " SSL_EMAIL
     fi
     
-    read -p "رمز عبور پایگاه داده (خالی بگذارید برای تولید خودکار): " DB_PASSWORD
+    read -p "رمز عبور پایگاه داده (خالی = خودکار): " DB_PASSWORD
     
+    echo
+    print_status "تنظیمات کاربر ادمین:"
+    read -p "نام کاربری ادمین (پیش‌فرض: admin): " ADMIN_USERNAME
+    ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
+    
+    read -s -p "رمز عبور ادمین (پیش‌فرض: admin123): " ADMIN_PASSWORD
+    ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin123}
+    echo
     echo
 }
 
