@@ -413,19 +413,24 @@ build_application() {
     print_status "نصب وابستگی‌ها و ساخت پروژه..."
     cd "$APP_DIR"
     
+    # Install dependencies
     sudo -u "$SERVICE_USER" npm install --production=false >/dev/null 2>&1
+    
+    # Build frontend
     sudo -u "$SERVICE_USER" npm run build >/dev/null 2>&1 || {
-        print_warning "خطا در ساخت، ایجاد فایل‌های پیش‌فرض..."
+        print_warning "خطا در ساخت فرانت‌اند، ایجاد فایل‌های پیش‌فرض..."
         mkdir -p dist
-        cp client/index.html dist/
-        echo "console.log('تک پوش خاص');" > dist/main.js
+        if [ -f "client/index.html" ]; then
+            cp client/index.html dist/
+        else
+            echo '<!DOCTYPE html><html><head><title>تک پوش خاص</title></head><body><h1>تک پوش خاص</h1></body></html>' > dist/index.html
+        fi
+        echo "console.log('تک پوش خاص - سرور آماده');" > dist/main.js
     }
     
-    # Compile TypeScript server
-    sudo -u "$SERVICE_USER" npx tsc server/index.ts --outDir server --target ES2020 --module commonjs 2>/dev/null || {
-        # Convert TS to JS manually
-        sed 's/import /const { /g; s/ from / } = require(/g; s/;$/);/g' server/index.ts > server/index.js
-    }
+    # Setup server for production
+    # Use tsx directly instead of compiling to JS
+    print_status "تنظیم سرور برای تولید..."
 }
 
 # Function to create systemd service
@@ -443,9 +448,14 @@ User=$SERVICE_USER
 Group=$SERVICE_USER
 WorkingDirectory=$APP_DIR
 Environment=NODE_ENV=production
-ExecStart=/usr/bin/node server/index.js
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:$APP_DIR/node_modules/.bin
+Environment=DATABASE_URL=postgresql://tek_push_user:$DB_PASSWORD@localhost:5432/tek_push_khas
+ExecStart=/usr/bin/node node_modules/.bin/tsx server/index.ts
 Restart=always
-RestartSec=5
+RestartSec=10
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=$APP_NAME
 
 [Install]
 WantedBy=multi-user.target
@@ -509,39 +519,98 @@ setup_ssl() {
 initialize_database() {
     print_status "راه‌اندازی پایگاه داده..."
     
-    # Create basic tables
-    sudo -u postgres psql tek_push_khas << EOF >/dev/null 2>&1
+    # Wait for database to be ready
+    sleep 2
+    
+    # Push database schema using Drizzle
+    cd "$APP_DIR"
+    sudo -u "$SERVICE_USER" npm run db:push >/dev/null 2>&1 || {
+        print_warning "خطا در ایجاد جداول، ایجاد دستی..."
+        
+        # Create basic tables manually
+        sudo -u postgres psql tek_push_khas << EOF >/dev/null 2>&1
 CREATE TABLE IF NOT EXISTS users (
     id SERIAL PRIMARY KEY,
     username VARCHAR(50) UNIQUE NOT NULL,
     password TEXT NOT NULL,
-    role VARCHAR(20) DEFAULT 'user',
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    email VARCHAR(100),
+    first_name VARCHAR(50),
+    last_name VARCHAR(50),
+    profile_image_url TEXT,
+    role VARCHAR(20) NOT NULL DEFAULT 'user',
+    is_active BOOLEAN DEFAULT true,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS brand_settings (
     id SERIAL PRIMARY KEY,
-    name VARCHAR(100) DEFAULT 'تک پوش خاص',
-    slogan TEXT DEFAULT 'برند منحصر به فرد شما',
+    name VARCHAR(100) NOT NULL DEFAULT 'تک پوش خاص',
+    slogan TEXT DEFAULT 'یک برند منحصر به فرد',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS tshirt_images (
     id SERIAL PRIMARY KEY,
-    title VARCHAR(200),
-    image_url TEXT,
-    active BOOLEAN DEFAULT true,
-    order_index INTEGER DEFAULT 0,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    title VARCHAR(200) DEFAULT 'تی‌شرت جدید',
+    description TEXT,
+    image_url TEXT NOT NULL,
+    size VARCHAR(10) DEFAULT 'M',
+    price VARCHAR(20) DEFAULT '50000',
+    is_active BOOLEAN DEFAULT true,
+    display_order INTEGER DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS social_links (
+    id SERIAL PRIMARY KEY,
+    platform VARCHAR(50) NOT NULL,
+    url TEXT NOT NULL,
+    is_active BOOLEAN DEFAULT true,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS copyright_settings (
+    id SERIAL PRIMARY KEY,
+    text TEXT NOT NULL DEFAULT '© 1404 تک پوش خاص. تمام حقوق محفوظ است.',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS about_content (
+    id SERIAL PRIMARY KEY,
+    content TEXT DEFAULT 'درباره تک پوش خاص',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+EOF
+    }
+    
+    # Insert default data
+    HASHED_PASSWORD=$(echo -n "$ADMIN_PASSWORD" | openssl dgst -sha256 -binary | openssl base64)
+    sudo -u postgres psql tek_push_khas << EOF >/dev/null 2>&1
 INSERT INTO brand_settings (name, slogan) 
-VALUES ('تک پوش خاص', 'برند منحصر به فرد شما') 
-ON CONFLICT DO NOTHING;
+VALUES ('تک پوش خاص', 'یک برند منحصر به فرد') 
+ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, slogan = EXCLUDED.slogan;
 
 INSERT INTO users (username, password, role) 
-VALUES ('$ADMIN_USERNAME', '\$2b\$10\$K9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z.Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z', 'admin')
-ON CONFLICT (username) DO NOTHING;
+VALUES ('$ADMIN_USERNAME', '$HASHED_PASSWORD', 'admin')
+ON CONFLICT (username) DO UPDATE SET password = EXCLUDED.password;
+
+INSERT INTO social_links (platform, url) 
+VALUES ('instagram', 'https://instagram.com/tekpushkhas')
+ON CONFLICT DO NOTHING;
+
+INSERT INTO copyright_settings (text) 
+VALUES ('© 1404 تک پوش خاص. تمام حقوق محفوظ است.')
+ON CONFLICT (id) DO UPDATE SET text = EXCLUDED.text;
+
+INSERT INTO about_content (content) 
+VALUES ('تک پوش خاص - برند منحصر به فرد شما')
+ON CONFLICT (id) DO UPDATE SET content = EXCLUDED.content;
 EOF
 }
 
@@ -561,9 +630,46 @@ configure_firewall() {
 # Function to start services
 start_services() {
     print_status "راه‌اندازی سرویس‌ها..."
-    systemctl start $APP_NAME
-    systemctl start nginx
-    sleep 3
+    
+    # Enable services
+    systemctl enable $APP_NAME >/dev/null 2>&1
+    systemctl enable nginx >/dev/null 2>&1
+    
+    # Start database first
+    systemctl start postgresql >/dev/null 2>&1
+    sleep 2
+    
+    # Start application
+    systemctl start $APP_NAME >/dev/null 2>&1
+    sleep 5
+    
+    # Check if app is running
+    if ! systemctl is-active --quiet $APP_NAME; then
+        print_warning "خطا در راه‌اندازی اپلیکیشن، تلاش مجدد..."
+        systemctl restart $APP_NAME >/dev/null 2>&1
+        sleep 5
+    fi
+    
+    # Start nginx
+    systemctl start nginx >/dev/null 2>&1
+    
+    # Final status check with health verification
+    print_status "بررسی وضعیت سرویس‌ها..."
+    if systemctl is-active --quiet $APP_NAME && systemctl is-active --quiet nginx; then
+        # Test HTTP response
+        sleep 3
+        if curl -s -o /dev/null -w "%{http_code}" http://localhost:3000 | grep -q "200\|404"; then
+            print_success "تمام سرویس‌ها با موفقیت راه‌اندازی شدند"
+        else
+            print_warning "سرور راه‌اندازی شده اما HTTP response مشکل دارد"
+            # Try to restart once more
+            systemctl restart $APP_NAME >/dev/null 2>&1
+            sleep 5
+        fi
+    else
+        print_warning "برخی سرویس‌ها مشکل دارند"
+        systemctl status $APP_NAME --no-pager -l >/dev/null 2>&1 || true
+    fi
 }
 
 # Function to display final information
