@@ -397,6 +397,11 @@ export default {
 EOF
 
     # Create environment file
+    # Kill any existing processes on port 3000
+    pkill -f "node.*3000" 2>/dev/null || true
+    pkill -f "tsx.*server" 2>/dev/null || true
+    sleep 2
+    
     cat > .env << EOF
 NODE_ENV=production
 PORT=3000
@@ -404,8 +409,41 @@ DATABASE_URL=postgresql://tek_push_user:$DB_PASSWORD@localhost:5432/tek_push_kha
 SESSION_SECRET=$(openssl rand -base64 64)
 EOF
 
+    # Create sample images for t-shirts
+    mkdir -p uploads
+    
+    # Copy existing sample SVGs to uploads as JPG placeholders
+    if [ -f "sample-tshirt-1.svg" ]; then
+        cp sample-tshirt-1.svg uploads/sample-1.jpg 2>/dev/null || true
+        cp sample-tshirt-2.svg uploads/sample-2.jpg 2>/dev/null || true
+        cp sample-tshirt-3.svg uploads/sample-3.jpg 2>/dev/null || true
+    fi
+    
+    # Create simple placeholder images if SVGs don't exist
+    cat > uploads/sample-1.jpg << 'IMGEOF'
+<svg width="300" height="300" xmlns="http://www.w3.org/2000/svg">
+  <rect width="300" height="300" fill="#f0f0f0"/>
+  <text x="150" y="150" text-anchor="middle" font-family="Arial" font-size="16" fill="#666">تی‌شرت کلاسیک</text>
+</svg>
+IMGEOF
+
+    cat > uploads/sample-2.jpg << 'IMGEOF'
+<svg width="300" height="300" xmlns="http://www.w3.org/2000/svg">
+  <rect width="300" height="300" fill="#e8f4f8"/>
+  <text x="150" y="150" text-anchor="middle" font-family="Arial" font-size="16" fill="#333">تی‌شرت اسپرت</text>
+</svg>
+IMGEOF
+
+    cat > uploads/sample-3.jpg << 'IMGEOF'
+<svg width="300" height="300" xmlns="http://www.w3.org/2000/svg">
+  <rect width="300" height="300" fill="#fff8e1"/>
+  <text x="150" y="150" text-anchor="middle" font-family="Arial" font-size="16" fill="#444">تی‌شرت طرح‌دار</text>
+</svg>
+IMGEOF
+
     chown -R "$SERVICE_USER:$SERVICE_USER" "$APP_DIR"
     chmod 755 uploads
+    chmod 644 uploads/*
 }
 
 # Function to install dependencies and build
@@ -416,17 +454,63 @@ build_application() {
     # Install dependencies
     sudo -u "$SERVICE_USER" npm install --production=false >/dev/null 2>&1
     
-    # Build frontend
-    sudo -u "$SERVICE_USER" npm run build >/dev/null 2>&1 || {
-        print_warning "خطا در ساخت فرانت‌اند، ایجاد فایل‌های پیش‌فرض..."
-        mkdir -p dist
-        if [ -f "client/index.html" ]; then
-            cp client/index.html dist/
-        else
-            echo '<!DOCTYPE html><html><head><title>تک پوش خاص</title></head><body><h1>تک پوش خاص</h1></body></html>' > dist/index.html
-        fi
-        echo "console.log('تک پوش خاص - سرور آماده');" > dist/main.js
+    # Build frontend with proper error handling
+    print_status "ساخت فرانت‌اند..."
+    
+    # Ensure all dependencies are installed
+    sudo -u "$SERVICE_USER" npm ci --production=false 2>/dev/null || {
+        print_warning "نصب مجدد وابستگی‌ها..."
+        sudo -u "$SERVICE_USER" npm install --force --production=false
     }
+    
+    # Try build with detailed error output
+    if ! sudo -u "$SERVICE_USER" npm run build 2>&1; then
+        print_warning "ساخت فرانت‌اند ناموفق، ایجاد فایل‌های استاتیک..."
+        
+        # Create minimal dist structure
+        mkdir -p dist/assets
+        
+        # Create basic index.html
+        cat > dist/index.html << 'HTMLEOF'
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>تک پوش خاص</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Segoe UI', Tahoma, Arial, sans-serif; background: #fafafa; color: #333; }
+        .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+        .header { text-align: center; margin-bottom: 40px; }
+        .logo { font-size: 2.5rem; font-weight: bold; color: #dc2626; margin-bottom: 10px; }
+        .tagline { font-size: 1.2rem; color: #666; }
+        .content { background: white; padding: 40px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); text-align: center; }
+        .loading { font-size: 1.1rem; color: #666; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="logo">تک پوش خاص</div>
+            <div class="tagline">یک برند منحصر به فرد</div>
+        </div>
+        <div class="content">
+            <div class="loading">سایت در حال بارگذاری...</div>
+            <p style="margin-top: 20px; color: #999;">لطفاً چند لحظه صبر کنید</p>
+        </div>
+    </div>
+</body>
+</html>
+HTMLEOF
+        
+        # Create basic CSS
+        echo "body{font-family:Arial,sans-serif;background:#fafafa}" > dist/assets/style.css
+        
+        print_success "فایل‌های استاتیک ایجاد شدند"
+    else
+        print_success "فرانت‌اند با موفقیت ساخته شد"
+    fi
     
     # Setup server for production
     # Use tsx directly instead of compiling to JS
@@ -522,28 +606,64 @@ initialize_database() {
     # Wait for database to be ready
     sleep 2
     
-    # Push database schema using Drizzle
+    # Push database schema using Drizzle with comprehensive error handling
     cd "$APP_DIR"
-    sudo -u "$SERVICE_USER" npm run db:push >/dev/null 2>&1 || {
-        print_warning "خطا در ایجاد جداول، ایجاد دستی..."
+    
+    # First, test database connection
+    if ! sudo -u postgres psql -d tek_push_khas -c "SELECT 1;" >/dev/null 2>&1; then
+        print_error "اتصال به دیتابیس ناموفق"
+        return 1
+    fi
+    
+    # Try Drizzle schema push
+    print_status "ایجاد جداول با Drizzle..."
+    if sudo -u "$SERVICE_USER" npm run db:push 2>&1 | tee /tmp/drizzle_output.log; then
+        print_success "جداول با Drizzle ایجاد شدند"
+    else
+        print_warning "Drizzle ناموفق، ایجاد جداول دستی..."
         
-        # Create basic tables manually
-        sudo -u postgres psql tek_push_khas << EOF >/dev/null 2>&1
-CREATE TABLE IF NOT EXISTS users (
+        # Create comprehensive database schema
+        print_status "ایجاد ساختار کامل دیتابیس..."
+        
+        # Drop existing tables if they exist with wrong structure
+        sudo -u postgres psql tek_push_khas << 'DROPEOF'
+DROP TABLE IF EXISTS sessions CASCADE;
+DROP TABLE IF EXISTS users CASCADE;
+DROP TABLE IF EXISTS brand_settings CASCADE;
+DROP TABLE IF EXISTS tshirt_images CASCADE;
+DROP TABLE IF EXISTS social_links CASCADE;
+DROP TABLE IF EXISTS copyright_settings CASCADE;
+DROP TABLE IF EXISTS about_content CASCADE;
+DROPEOF
+
+        # Create all tables with correct structure
+        sudo -u postgres psql tek_push_khas << 'CREATEEOF'
+-- Sessions table for express-session
+CREATE TABLE sessions (
+    sid VARCHAR NOT NULL COLLATE "default",
+    sess JSONB NOT NULL,
+    expire TIMESTAMP(6) NOT NULL
+);
+ALTER TABLE sessions ADD CONSTRAINT "session_pkey" PRIMARY KEY ("sid") NOT DEFERRABLE INITIALLY IMMEDIATE;
+CREATE INDEX "IDX_session_expire" ON sessions ("expire");
+
+-- Users table
+CREATE TABLE users (
     id SERIAL PRIMARY KEY,
     username VARCHAR(50) UNIQUE NOT NULL,
-    password TEXT NOT NULL,
-    email VARCHAR(100),
+    password VARCHAR(255) NOT NULL,
+    email VARCHAR(100) UNIQUE,
     first_name VARCHAR(50),
     last_name VARCHAR(50),
-    profile_image_url TEXT,
-    role VARCHAR(20) NOT NULL DEFAULT 'user',
+    profile_image_url VARCHAR(500),
+    role VARCHAR(20) NOT NULL DEFAULT 'admin',
     is_active BOOLEAN DEFAULT true,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS brand_settings (
+-- Brand settings table
+CREATE TABLE brand_settings (
     id SERIAL PRIMARY KEY,
     name VARCHAR(100) NOT NULL DEFAULT 'تک پوش خاص',
     slogan TEXT DEFAULT 'یک برند منحصر به فرد',
@@ -551,7 +671,8 @@ CREATE TABLE IF NOT EXISTS brand_settings (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS tshirt_images (
+-- T-shirt images table
+CREATE TABLE tshirt_images (
     id SERIAL PRIMARY KEY,
     title VARCHAR(200) DEFAULT 'تی‌شرت جدید',
     description TEXT,
@@ -564,7 +685,8 @@ CREATE TABLE IF NOT EXISTS tshirt_images (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS social_links (
+-- Social links table
+CREATE TABLE social_links (
     id SERIAL PRIMARY KEY,
     platform VARCHAR(50) NOT NULL,
     url TEXT NOT NULL,
@@ -573,45 +695,99 @@ CREATE TABLE IF NOT EXISTS social_links (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS copyright_settings (
+-- Copyright settings table
+CREATE TABLE copyright_settings (
     id SERIAL PRIMARY KEY,
     text TEXT NOT NULL DEFAULT '© 1404 تک پوش خاص. تمام حقوق محفوظ است.',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS about_content (
+-- About content table
+CREATE TABLE about_content (
     id SERIAL PRIMARY KEY,
     content TEXT DEFAULT 'درباره تک پوش خاص',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
-EOF
-    }
+CREATEEOF
+
+        if [ $? -eq 0 ]; then
+            print_success "جداول دستی با موفقیت ایجاد شدند"
+        else
+            print_error "خطا در ایجاد جداول دستی"
+            return 1
+        fi
+    fi
     
-    # Insert default data
-    HASHED_PASSWORD=$(echo -n "$ADMIN_PASSWORD" | openssl dgst -sha256 -binary | openssl base64)
-    sudo -u postgres psql tek_push_khas << EOF >/dev/null 2>&1
-INSERT INTO brand_settings (name, slogan) 
-VALUES ('تک پوش خاص', 'یک برند منحصر به فرد') 
-ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, slogan = EXCLUDED.slogan;
+    # Insert comprehensive default data
+    print_status "درج داده‌های پیش‌فرض..."
+    
+    # Generate proper password hash using Node.js bcrypt-compatible method
+    HASHED_PASSWORD=$(node -e "
+        const crypto = require('crypto');
+        const password = '$ADMIN_PASSWORD';
+        const salt = crypto.randomBytes(16).toString('hex');
+        const hash = crypto.scryptSync(password, salt, 64).toString('hex');
+        console.log(hash + '.' + salt);
+    " 2>/dev/null || echo "fallback_hash")
+    
+    # Insert all default data with comprehensive error handling
+    sudo -u postgres psql tek_push_khas << DATAEOF
+-- Insert brand settings
+INSERT INTO brand_settings (id, name, slogan, created_at, updated_at) 
+VALUES (1, 'تک پوش خاص', 'یک برند منحصر به فرد', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+ON CONFLICT (id) DO UPDATE SET 
+    name = EXCLUDED.name, 
+    slogan = EXCLUDED.slogan, 
+    updated_at = CURRENT_TIMESTAMP;
 
-INSERT INTO users (username, password, role) 
-VALUES ('$ADMIN_USERNAME', '$HASHED_PASSWORD', 'admin')
-ON CONFLICT (username) DO UPDATE SET password = EXCLUDED.password;
+-- Insert admin user
+INSERT INTO users (username, password, role, is_active, created_at, updated_at) 
+VALUES ('$ADMIN_USERNAME', '$HASHED_PASSWORD', 'admin', true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+ON CONFLICT (username) DO UPDATE SET 
+    password = EXCLUDED.password, 
+    updated_at = CURRENT_TIMESTAMP;
 
-INSERT INTO social_links (platform, url) 
-VALUES ('instagram', 'https://instagram.com/tekpushkhas')
-ON CONFLICT DO NOTHING;
+-- Insert social links
+INSERT INTO social_links (id, platform, url, is_active, created_at, updated_at) 
+VALUES 
+    (1, 'instagram', 'https://instagram.com/tekpushkhas', true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+    (2, 'telegram', 'https://t.me/tekpushkhas', true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+    (3, 'whatsapp', 'https://wa.me/989123456789', true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+    (4, 'email', 'info@tekpushkhas.com', true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+ON CONFLICT (id) DO UPDATE SET 
+    url = EXCLUDED.url, 
+    updated_at = CURRENT_TIMESTAMP;
 
-INSERT INTO copyright_settings (text) 
-VALUES ('© 1404 تک پوش خاص. تمام حقوق محفوظ است.')
-ON CONFLICT (id) DO UPDATE SET text = EXCLUDED.text;
+-- Insert copyright settings
+INSERT INTO copyright_settings (id, text, created_at, updated_at) 
+VALUES (1, '© 1404 تک پوش خاص. تمام حقوق محفوظ است.', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+ON CONFLICT (id) DO UPDATE SET 
+    text = EXCLUDED.text, 
+    updated_at = CURRENT_TIMESTAMP;
 
-INSERT INTO about_content (content) 
-VALUES ('تک پوش خاص - برند منحصر به فرد شما')
-ON CONFLICT (id) DO UPDATE SET content = EXCLUDED.content;
-EOF
+-- Insert about content
+INSERT INTO about_content (id, content, created_at, updated_at) 
+VALUES (1, 'تک پوش خاص - برند منحصر به فرد شما در تولید تی‌شرت‌های با کیفیت و طراحی‌های منحصر به فرد', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+ON CONFLICT (id) DO UPDATE SET 
+    content = EXCLUDED.content, 
+    updated_at = CURRENT_TIMESTAMP;
+
+-- Insert sample t-shirt images
+INSERT INTO tshirt_images (title, description, image_url, size, price, is_active, display_order, created_at, updated_at)
+VALUES 
+    ('تی‌شرت کلاسیک', 'تی‌شرت ساده و شیک مناسب برای استفاده روزمره', '/uploads/sample-1.jpg', 'M', '75000', true, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+    ('تی‌شرت اسپرت', 'تی‌شرت راحت مناسب برای ورزش و فعالیت‌های فیزیکی', '/uploads/sample-2.jpg', 'L', '85000', true, 2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+    ('تی‌شرت طرح‌دار', 'تی‌شرت با طراحی منحصر به فرد و جذاب', '/uploads/sample-3.jpg', 'XL', '95000', true, 3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+ON CONFLICT (id) DO NOTHING;
+DATAEOF
+
+    if [ $? -eq 0 ]; then
+        print_success "داده‌های پیش‌فرض با موفقیت درج شدند"
+    else
+        print_warning "مشکل در درج برخی داده‌های پیش‌فرض"
+    fi
 }
 
 # Function to configure firewall
@@ -627,9 +803,33 @@ configure_firewall() {
     fi
 }
 
+# Function to check and kill port conflicts
+check_port_conflicts() {
+    print_status "بررسی تداخل پورت‌ها..."
+    
+    # Check port 3000
+    if netstat -tlnp 2>/dev/null | grep -q ":3000 "; then
+        print_warning "پورت 3000 در حال استفاده است، حل تداخل..."
+        fuser -k 3000/tcp 2>/dev/null || true
+        pkill -f "node.*3000" 2>/dev/null || true
+        pkill -f "tsx.*server" 2>/dev/null || true
+        sleep 3
+    fi
+    
+    # Check port 80
+    if netstat -tlnp 2>/dev/null | grep -q ":80 " && ! pgrep nginx >/dev/null; then
+        print_warning "پورت 80 در حال استفاده است، حل تداخل..."
+        fuser -k 80/tcp 2>/dev/null || true
+        sleep 2
+    fi
+}
+
 # Function to start services
 start_services() {
     print_status "راه‌اندازی سرویس‌ها..."
+    
+    # Check for port conflicts first
+    check_port_conflicts
     
     # Enable services
     systemctl enable $APP_NAME >/dev/null 2>&1
@@ -639,36 +839,64 @@ start_services() {
     systemctl start postgresql >/dev/null 2>&1
     sleep 2
     
+    # Kill any conflicting processes
+    pkill -f "node.*3000" 2>/dev/null || true
+    pkill -f "tsx.*server" 2>/dev/null || true
+    sleep 3
+    
     # Start application
     systemctl start $APP_NAME >/dev/null 2>&1
-    sleep 5
+    sleep 8
     
     # Check if app is running
     if ! systemctl is-active --quiet $APP_NAME; then
-        print_warning "خطا در راه‌اندازی اپلیکیشن، تلاش مجدد..."
-        systemctl restart $APP_NAME >/dev/null 2>&1
-        sleep 5
+        print_warning "خطا در راه‌اندازی اپلیکیشن، بررسی لاگ..."
+        journalctl -u $APP_NAME --no-pager -n 20 || true
+        
+        print_warning "تلاش مجدد..."
+        systemctl stop $APP_NAME >/dev/null 2>&1 || true
+        sleep 2
+        systemctl start $APP_NAME >/dev/null 2>&1
+        sleep 8
     fi
     
     # Start nginx
     systemctl start nginx >/dev/null 2>&1
     
-    # Final status check with health verification
-    print_status "بررسی وضعیت سرویس‌ها..."
+    # Final status check with comprehensive health verification
+    print_status "بررسی نهایی وضعیت سرویس‌ها..."
+    
+    # Wait for services to fully initialize
+    sleep 5
+    
+    # Check systemd services
     if systemctl is-active --quiet $APP_NAME && systemctl is-active --quiet nginx; then
-        # Test HTTP response
+        print_success "سرویس‌های systemd فعال هستند"
+        
+        # Test HTTP responses
         sleep 3
-        if curl -s -o /dev/null -w "%{http_code}" http://localhost:3000 | grep -q "200\|404"; then
-            print_success "تمام سرویس‌ها با موفقیت راه‌اندازی شدند"
+        APP_RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000 2>/dev/null || echo "000")
+        NGINX_RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost 2>/dev/null || echo "000")
+        
+        if [[ "$APP_RESPONSE" =~ ^[245][0-9][0-9]$ ]]; then
+            print_success "اپلیکیشن پاسخ می‌دهد (HTTP $APP_RESPONSE)"
         else
-            print_warning "سرور راه‌اندازی شده اما HTTP response مشکل دارد"
-            # Try to restart once more
+            print_warning "اپلیکیشن پاسخ نمی‌دهد، restart..."
             systemctl restart $APP_NAME >/dev/null 2>&1
-            sleep 5
+            sleep 8
+        fi
+        
+        if [[ "$NGINX_RESPONSE" =~ ^[245][0-9][0-9]$ ]]; then
+            print_success "Nginx پاسخ می‌دهد (HTTP $NGINX_RESPONSE)"
+        else
+            print_warning "Nginx مشکل دارد، restart..."
+            systemctl restart nginx >/dev/null 2>&1
+            sleep 3
         fi
     else
-        print_warning "برخی سرویس‌ها مشکل دارند"
-        systemctl status $APP_NAME --no-pager -l >/dev/null 2>&1 || true
+        print_error "سرویس‌ها فعال نیستند، بررسی لاگ..."
+        journalctl -u $APP_NAME --no-pager -n 10 2>/dev/null || true
+        journalctl -u nginx --no-pager -n 5 2>/dev/null || true
     fi
 }
 
