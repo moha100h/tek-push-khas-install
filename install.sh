@@ -1,74 +1,83 @@
 #!/bin/bash
-set -e
 
+echo ""
+echo "=================================================="
+echo "   Session Manager Pro - Auto Installer"
+echo "=================================================="
+echo ""
+
+# رنگ‌ها
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 BLUE='\033[0;34m'; CYAN='\033[0;36m'; NC='\033[0m'
 
-log()    { echo -e "${GREEN}[✔]${NC} $1"; }
-warn()   { echo -e "${YELLOW}[⚠]${NC} $1"; }
-error()  { echo -e "${RED}[✘]${NC} $1"; exit 1; }
-info()   { echo -e "${CYAN}[➤]${NC} $1"; }
-header() { echo -e "\n${BLUE}══════════════════════════════════════${NC}"; echo -e "${BLUE}  $1${NC}"; echo -e "${BLUE}══════════════════════════════════════${NC}\n"; }
+log()    { echo -e "${GREEN}[OK]${NC} $1"; }
+warn()   { echo -e "${YELLOW}[!!]${NC} $1"; }
+err()    { echo -e "${RED}[ERR]${NC} $1"; exit 1; }
+info()   { echo -e "${CYAN}[>>]${NC} $1"; }
 
+# متغیرها
 BOT_TOKEN="8857350914:AAEovAJjOjLIKVQW7ocSDaX5zEE0sTu_F4Q"
 API_ID="32351310"
 API_HASH="9b4e6a3d9fa116dccef9a20c3c961840"
 POSTGRES_DB="tisdata"
 POSTGRES_USER="tisadmin"
 POSTGRES_PASSWORD='SN662499$rr'
-SERVER_IP=$(curl -s ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')
 INSTALL_DIR="/var/www/session-manager-pro"
 REPO_URL="https://github.com/moha100h/session-manager-pro.git"
 
-check_root() { [[ $EUID -ne 0 ]] && error "با root اجرا کن: sudo bash install.sh"; }
+echo "[1/6] دریافت IP سرور..."
+SERVER_IP=$(curl -s --max-time 5 ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')
+echo "      IP: $SERVER_IP"
 
-wait_for_docker_healthy() {
-    local container=$1 max=60 count=0
-    info "منتظر $container ..."
-    while true; do
-        status=$(docker inspect --format='{{.State.Health.Status}}' "$container" 2>/dev/null || echo "missing")
-        [[ "$status" == "healthy" ]] && { log "$container سالم است"; return 0; }
-        [[ "$status" == "missing" ]] && { warn "$container بدون healthcheck"; return 0; }
-        sleep 2; count=$((count+1))
-        [[ $count -ge $max ]] && { warn "$container timeout"; return 0; }
-    done
-}
+# چک root
+if [ "$EUID" -ne 0 ]; then
+    err "باید با root اجرا شود. دستور: sudo bash install.sh"
+fi
+log "دسترسی root تایید شد"
 
-check_root
-
-header "مرحله ۱/۶ - آپدیت سیستم"
+echo ""
+echo "[2/6] آپدیت سیستم..."
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -y -q
-apt-get upgrade -y -q -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold"
-apt-get install -y -q curl git wget ufw ca-certificates gnupg
+apt-get update -y -q 2>&1 | tail -1
+apt-get install -y -q curl git wget ufw ca-certificates gnupg 2>&1 | tail -1
 log "سیستم آپدیت شد"
 
-header "مرحله ۲/۶ - نصب Docker"
-if ! command -v docker &>/dev/null; then
-    info "نصب Docker..."
-    curl -fsSL https://get.docker.com | sh
-    systemctl enable docker
-    systemctl start docker
+echo ""
+echo "[3/6] نصب Docker..."
+if command -v docker &>/dev/null; then
+    log "Docker قبلا نصب است: $(docker --version)"
+else
+    info "در حال نصب Docker..."
+    curl -fsSL https://get.docker.com | sh 2>&1 | tail -3
+    systemctl enable docker 2>/dev/null
+    systemctl start docker 2>/dev/null
     sleep 3
+    log "Docker نصب شد: $(docker --version)"
 fi
-log "Docker: $(docker --version)"
 
-header "مرحله ۳/۶ - دریافت پروژه"
+echo ""
+echo "[4/6] دریافت پروژه..."
 mkdir -p /var/www
-if [[ -d "$INSTALL_DIR/.git" ]]; then
+if [ -d "$INSTALL_DIR/.git" ]; then
     info "پروژه موجود است - آپدیت..."
-    cd "$INSTALL_DIR" && git pull origin main || warn "git pull ناموفق"
+    cd "$INSTALL_DIR" && git pull origin main 2>&1 | tail -1 || warn "git pull ناموفق"
 else
     rm -rf "$INSTALL_DIR"
-    info "کمون پروژه..."
-    git clone "$REPO_URL" "$INSTALL_DIR" || error "کمون ناموفق - ریپو را چک کنید"
+    info "کلون پروژه..."
+    git clone "$REPO_URL" "$INSTALL_DIR" 2>&1 | tail -2
+    if [ ! -d "$INSTALL_DIR" ]; then
+        err "کلون ناموفق بود"
+    fi
 fi
 cd "$INSTALL_DIR"
 log "پروژه آماده: $INSTALL_DIR"
+ls -la
 
-header "مرحله ۴/۶ - ساخت .env"
-JWT_SECRET=$(openssl rand -hex 32)
-ENCRYPTION_KEY=$(openssl rand -hex 16)
+echo ""
+echo "[5/6] ساخت .env..."
+JWT_SECRET=$(openssl rand -hex 32 2>/dev/null || echo "fallback_jwt_secret_change_me_32ch")
+ENCRYPTION_KEY=$(openssl rand -hex 16 2>/dev/null || echo "fallback_enc_key!")
+
 cat > "$INSTALL_DIR/.env" << ENVEOF
 POSTGRES_DB=${POSTGRES_DB}
 POSTGRES_USER=${POSTGRES_USER}
@@ -95,60 +104,42 @@ TON_WALLET=YOUR_TON_WALLET_ADDRESS
 TRX_WALLET=YOUR_TRX_WALLET_ADDRESS
 DOMAIN=${SERVER_IP}
 ENVEOF
-log ".env Yاخت شد"
+log ".env ساخته شد"
 
-header "مرحله ص/ٶ - فيروال"
-ufw --force reset
-ufw default deny incoming
-ufw default allow outgoing
-ufw allow 22/tcp
-ufw allow 80/tcp
-ufw allow 443/tcp
-ufw --force enable
-log "فیر؈ال: 22, 80, 443"
-
-header "مرحله ض/ٶ - Build وراهاندازی"
+echo ""
+echo "[6/6] Build و راه‌اهدازی Docker..."
 cd "$INSTALL_DIR"
 docker compose down --remove-orphans 2>/dev/null || true
-info "Build دز Xام انجام است (چڪ دقیفه شقوکم می‌کنج)..."
-docker compose build --no-cache 2>&1 | grep -E "Step|Successfully|error|Error|=>|DONE" || true
+info "Build در ؖال انجام است (چڪ دقیفه شقوکم می‌کنج)..."
+docker compose build --no-cache 2>&1 | grep -E "Step|Successfully|error|Error|=>|DONE|ERROR" || true
 log "Build کمله شد"
+info "راه‌اهدازی سرویس‌ها..."
 docker compose up -d
-sleep 8
-
-wait_for_docker_healthy "smp_postgres"
-wait_for_docker_healthy "smp_redis"
-wait_for_docker_healthy "smp_api"
+sleep 10
 
 echo ""
-echo "وضمیت سرویس‌هإ:"
+echo "وضمویت سرویس‌ها:"
 docker compose ps
-echo ""
 
-for i in 1 2 3 4 5; do
+echo ""
+info "تست API..."
+for i in 1 2 3 4 5 6; do
     if curl -sf "http://localhost:8000/api/health" &>/dev/null; then
-        log "API آنلاین ✔"
+        log "API آنلاین!"
         break
     fi
-    [[ $i -eq 5 ]] && warn "API هنوؚ در چڪ راه —چڪ مشان شودی"
-    sleep 6
+    [ $i -eq 6 ] && warn "API هنو֚ در چڪ راه‌اهدازی"
+    sleep 5
 done
 
-if curl -sf "http://localhost" &>/dev/null; then
-    log "پروژه آنصلاین ✔"
-else
-    warn "پروژه هنو֚ در چڪ راه —چڪ مشان شودی"
-fi
-
-echo -e "\n${GREEN}╓║║║║║║║║║║║║║║║║║║║║║║║║║║║║║║║║║║║║║║║║║╕�{NC}"
-echo -e "${GREEN}║      نصب ba موفقیت انخام شد! ✅        ║${NC}"
-echo -e "${GREEN}╕╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╗${NC}"
-echo -e "   🌖 Sیب:   ${CYAN}http://${SERVER_IP}${NC}"
-echo -e "   🔊 API:    ${CYAN}http://${SERVER_IP}/api/health${NC}"
-echo -e "   📁 مسرت: ${CYAN}${INSTALL_DIR}${NC}"
 echo ""
-echo -e "${YELLOW}⚠️  X��Gگه نصب:"
-echo -e "  • ADMIN_IDS را �.env با اید تلٯرام خودت ظماغ ظماغ"
-echo -e "   • ادرس کیف پرداخت در �.env تنظیم کن"
-echo -e "   • برای نصا: ${CYAN}cd ${INSTALL_DIR} && docker compose logs -f${NC}"
+echo "=================================================="
+echo "  نصب کامل شد!"
+echo "  سیت:  http://${SERVER_IP}"
+echo "  API:   http://${SERVER_IP}/api/health"
+echo "  مشان:"
+echo "    cd ${INSTALL_DIR} && docker compose logs -f"
+echo "==================================================="
+echo ""
+echo "ADMIN_IDS را دز n.env با ایدی تلٯرام خودت ظماغ ظماغ ظماغ"
 echo ""
