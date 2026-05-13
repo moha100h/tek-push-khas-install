@@ -1,158 +1,154 @@
 #!/bin/bash
 set -e
 
-echo ""
-echo "================================================"
-echo "   نصب سیستم Session Manager"
-echo "================================================"
-echo ""
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+BLUE='\033[0;34m'; CYAN='\033[0;36m'; NC='\033[0m'
 
-# ── ۱. آپدیت سیستم ──────────────────────────────
-echo "[1/9] آپدیت سیستم..."
-apt update -y && apt upgrade -y
-apt install -y git curl nginx python3 python3-pip postgresql postgresql-contrib redis-server ufw
-echo "✅ سیستم آپدیت شد"
+log()    { echo -e "${GREEN}[✔]${NC} $1"; }
+warn()   { echo -e "${YELLOW}[⚠]${NC} $1"; }
+error()  { echo -e "${RED}[✘]${NC} $1"; exit 1; }
+info()   { echo -e "${CYAN}[➤]${NC} $1"; }
+header() { echo -e "\n${BLUE}══════════════════════════════════════${NC}"; echo -e "${BLUE}  $1${NC}"; echo -e "${BLUE}══════════════════════════════════════${NC}\n"; }
 
-# ── ۲. Node.js 20 ────────────────────────────────
-echo "[2/9] نصب Node.js..."
-curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-apt install -y nodejs
-npm install -g pm2
-echo "✅ Node.js $(node -v) نصب شد"
+BOT_TOKEN="8857350914:AAEovAJjOjLIKVQW7ocSDaX5zEE0sTu_F4Q"
+API_ID="32351310"
+API_HASH="9b4e6a3d9fa116dccef9a20c3c961840"
+POSTGRES_DB="tisdata"
+POSTGRES_USER="tisadmin"
+POSTGRES_PASSWORD='SN662499$rr'
+SERVER_IP=$(curl -s ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')
+INSTALL_DIR="/var/www/session-manager-pro"
+REPO_URL="https://github.com/moha100h/session-manager-pro.git"
 
-# ── ۳. PostgreSQL ────────────────────────────────
-echo "[3/9] تنظیم دیتابیس..."
-systemctl start postgresql
-systemctl enable postgresql
-sudo -u postgres psql -c "CREATE USER tisadmin WITH PASSWORD 'SN662499\$rr';" 2>/dev/null || echo "یوزر قبلاً وجود داشت"
-sudo -u postgres psql -c "CREATE DATABASE tisdata OWNER tisadmin;" 2>/dev/null || echo "دیتابیس قبلاً وجود داشت"
-sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE tisdata TO tisadmin;"
-echo "✅ دیتابیس آماده شد"
+check_root() { [[ $EUID -ne 0 ]] && error "با root اجرا کن: sudo bash install.sh"; }
 
-# ── ۴. Redis ─────────────────────────────────────
-echo "[4/9] راه‌اندازی Redis..."
-systemctl start redis-server
-systemctl enable redis-server
-echo "✅ Redis آماده شد"
+wait_for_docker_healthy() {
+    local container=$1 max=60 count=0
+    info "منتظر $container ..."
+    while true; do
+        status=$(docker inspect --format='{{.State.Health.Status}}' "$container" 2>/dev/null || echo "missing")
+        [[ "$status" == "healthy" ]] && { log "$container سالم است"; return 0; }
+        [[ "$status" == "missing" ]] && { warn "$container بدون healthcheck"; return 0; }
+        sleep 2; count=$((count+1))
+        [[ $count -ge $max ]] && { warn "$container timeout"; return 0; }
+    done
+}
 
-# ── ۵. کلون پروژه ────────────────────────────────
-echo "[5/9] دانلود پروژه..."
+check_root
+
+header "مرحله ۱/۶ - آپدیت سیستم"
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -y -q
+apt-get upgrade -y -q -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold"
+apt-get install -y -q curl git wget ufw ca-certificates gnupg
+log "سیستم آپدیت شد"
+
+header "مرحله ۲/۶ - نصب Docker"
+if ! command -v docker &>/dev/null; then
+    info "نصب Docker..."
+    curl -fsSL https://get.docker.com | sh
+    systemctl enable docker
+    systemctl start docker
+    sleep 3
+fi
+log "Docker: $(docker --version)"
+
+header "مرحله ۳/۶ - دریافت پروژه"
 mkdir -p /var/www
-cd /var/www
-rm -rf session-manager
-git clone https://github.com/moha100h/session-manager.git 2>/dev/null || {
-  echo "⚠️  ریپو session-manager پیدا نشد — پوشه خالی می‌سازم"
-  mkdir -p session-manager
-}
-cd session-manager
-echo "✅ پروژه دانلود شد"
+if [[ -d "$INSTALL_DIR/.git" ]]; then
+    info "پروژه موجود است - آپدیت..."
+    cd "$INSTALL_DIR" && git pull origin main || warn "git pull ناموفق"
+else
+    rm -rf "$INSTALL_DIR"
+    info "کمون پروژه..."
+    git clone "$REPO_URL" "$INSTALL_DIR" || error "کمون ناموفق - ریپو را چک کنید"
+fi
+cd "$INSTALL_DIR"
+log "پروژه آماده: $INSTALL_DIR"
 
-# ── ۶. فایل .env ─────────────────────────────────
-echo "[6/9] ساخت فایل .env..."
-cat > /var/www/session-manager/.env << 'ENVEOF'
-BOT_TOKEN=8857350914:AAEovAJjOjLIKVQW7ocSDaX5zEE0sTu_F4Q
-API_ID=32351310
-API_HASH=9b4e6a3d9fa116dccef9a20c3c961840
-DATABASE_URL=postgresql://tisadmin:SN662499$rr@localhost/tisdata
-REDIS_URL=redis://localhost:6379
-HOST=0.0.0.0
-PORT=8000
+header "مرحله ۴/۶ - ساخت .env"
+JWT_SECRET=$(openssl rand -hex 32)
+ENCRYPTION_KEY=$(openssl rand -hex 16)
+cat > "$INSTALL_DIR/.env" << ENVEOF
+POSTGRES_DB=${POSTGRES_DB}
+POSTGRES_USER=${POSTGRES_USER}
+POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+REDIS_URL=redis://redis:6379
+JWT_SECRET=${JWT_SECRET}
+JWT_EXPIRE_HOURS=720
+ENCRYPTION_KEY=${ENCRYPTION_KEY}
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=${POSTGRES_PASSWORD}
+BOT_TOKEN=${BOT_TOKEN}
+ADMIN_IDS=123456789
+API_ID=${API_ID}
+API_HASH=${API_HASH}
+CHECK_INTERVAL_MINUTES=30
+LOG_LEVEL=INFO
+REACT_APP_API_URL=http://${SERVER_IP}/api
+BACKUP_BOT_TOKEN=${BOT_TOKEN}
+BACKUP_CHAT_ID=-1001234567890
+BACKUP_INTERVAL_HOURS=1
+USDT_TRC20_WALLET=YOUR_USDT_TRC20_ADDRESS
+TON_WALLET=YOUR_TON_WALLET_ADDRESS
+TRX_WALLET=YOUR_TRX_WALLET_ADDRESS
+DOMAIN=${SERVER_IP}
 ENVEOF
-echo "✅ فایل .env ساخته شد"
+log ".env Yاخت شد"
 
-# ── ۷. نصب وابستگی‌ها ────────────────────────────
-echo "[7/9] نصب وابستگی‌ها..."
-cd /var/www/session-manager
-
-if [ -f package.json ]; then
-  npm install
-  echo "✅ Node packages نصب شد"
-fi
-
-if [ -f requirements.txt ]; then
-  pip3 install -r requirements.txt
-  echo "✅ Python packages نصب شد"
-fi
-
-if [ -d frontend ]; then
-  cd frontend
-  npm install
-  npm run build
-  cd ..
-  echo "✅ Frontend build شد"
-fi
-
-# ── ۸. PM2 ───────────────────────────────────────
-echo "[8/9] راه‌اندازی سرویس‌ها..."
-pm2 delete all 2>/dev/null || true
-
-if [ -f bot/index.js ]; then
-  pm2 start bot/index.js --name session-bot
-fi
-
-if [ -f main.py ]; then
-  pm2 start "uvicorn main:app --host 127.0.0.1 --port 8000" --name session-api --interpreter none
-fi
-
-pm2 save
-env PATH=$PATH:/usr/bin pm2 startup systemd -u root --hp /root | tail -1 | bash || true
-echo "✅ PM2 راه‌اندازی شد"
-
-# ── ۹. Nginx ─────────────────────────────────────
-echo "[9/9] تنظیم Nginx..."
-cat > /etc/nginx/sites-available/session-manager << 'NGINXEOF'
-server {
-    listen 80;
-    server_name 2.58.172.164;
-
-    location / {
-        root /var/www/session-manager/frontend/dist;
-        try_files $uri $uri/ /index.html;
-        add_header Cache-Control "no-cache";
-    }
-
-    location /api/ {
-        proxy_pass http://127.0.0.1:8000/;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-
-    location /ws/ {
-        proxy_pass http://127.0.0.1:3000/;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_read_timeout 86400;
-    }
-
-    access_log /var/log/nginx/session-manager.access.log;
-    error_log  /var/log/nginx/session-manager.error.log;
-}
-NGINXEOF
-
-rm -f /etc/nginx/sites-enabled/default
-ln -sf /etc/nginx/sites-available/session-manager /etc/nginx/sites-enabled/
-nginx -t && systemctl reload nginx
-echo "✅ Nginx تنظیم شد"
-
-# ── فایروال ──────────────────────────────────────
-ufw allow 9011/tcp
+header "مرحله ص/ٶ - فيروال"
+ufw --force reset
+ufw default deny incoming
+ufw default allow outgoing
+ufw allow 22/tcp
 ufw allow 80/tcp
 ufw allow 443/tcp
 ufw --force enable
+log "فیر؈ال: 22, 80, 443"
 
-# ── نتیجه نهایی ──────────────────────────────────
+header "مرحله ض/ٶ - Build وراهاندازی"
+cd "$INSTALL_DIR"
+docker compose down --remove-orphans 2>/dev/null || true
+info "Build دز Xام انجام است (چڪ دقیفه شقوکم می‌کنج)..."
+docker compose build --no-cache 2>&1 | grep -E "Step|Successfully|error|Error|=>|DONE" || true
+log "Build کمله شد"
+docker compose up -d
+sleep 8
+
+wait_for_docker_healthy "smp_postgres"
+wait_for_docker_healthy "smp_redis"
+wait_for_docker_healthy "smp_api"
+
 echo ""
-echo "================================================"
-echo "   ✅ نصب کامل شد!"
-echo "================================================"
+echo "وضمیت سرویس‌هإ:"
+docker compose ps
 echo ""
-echo "🌐 آدرس سایت: http://2.58.172.164"
+
+for i in 1 2 3 4 5; do
+    if curl -sf "http://localhost:8000/api/health" &>/dev/null; then
+        log "API آنلاین ✔"
+        break
+    fi
+    [[ $i -eq 5 ]] && warn "API هنوؚ در چڪ راه —چڪ مشان شودی"
+    sleep 6
+done
+
+if curl -sf "http://localhost" &>/dev/null; then
+    log "پروژه آنصلاین ✔"
+else
+    warn "پروژه هنو֚ در چڪ راه —چڪ مشان شودی"
+fi
+
+echo -e "\n${GREEN}╓║║║║║║║║║║║║║║║║║║║║║║║║║║║║║║║║║║║║║║║║║╕�{NC}"
+echo -e "${GREEN}║      نصب ba موفقیت انخام شد! ✅        ║${NC}"
+echo -e "${GREEN}╕╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╓╗${NC}"
+echo -e "   🌖 Sیب:   ${CYAN}http://${SERVER_IP}${NC}"
+echo -e "   🔊 API:    ${CYAN}http://${SERVER_IP}/api/health${NC}"
+echo -e "   📁 مسرت: ${CYAN}${INSTALL_DIR}${NC}"
 echo ""
-echo "📊 وضعیت سرویس‌ها:"
-pm2 status
+echo -e "${YELLOW}⚠️  X��Gگه نصب:"
+echo -e "  • ADMIN_IDS را �.env با اید تلٯرام خودت ظماغ ظماغ"
+echo -e "   • ادرس کیف پرداخت در �.env تنظیم کن"
+echo -e "   • برای نصا: ${CYAN}cd ${INSTALL_DIR} && docker compose logs -f${NC}"
 echo ""
-echo "🔍 تست سریع:"
-curl -s -o /dev/null -w "HTTP Status: %{http_code}\n" http://localhost || echo "Nginx در حال اجرا"
